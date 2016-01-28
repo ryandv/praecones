@@ -2,14 +2,11 @@ module Main where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
-import Control.Concurrent.STM.TVar
 
 import Control.Monad
 import Control.Monad.IO.Class
-import Control.Monad.Trans.State.Lazy
 
 import Data.Maybe
-import Data.Char
 
 import Data.Time.Clock
 import Data.Time.Format
@@ -17,9 +14,17 @@ import Data.Time.LocalTime
 
 import System.IO
 import System.Process
-import System.Random
 
-data Statusbar = Statusbar (TVar (String, String))
+data Statusbar = Statusbar (TVar StatusbarInfo)
+
+data StatusbarInfo = StatusbarInfo
+  { xmonadSection :: String
+  , datetimeSection :: String
+  , version :: Int
+  }
+
+instance Eq StatusbarInfo where
+  (==) x y = (xmonadSection x == xmonadSection y) && (datetimeSection x == datetimeSection y)
 
 {-- CONFIG --}
 
@@ -49,26 +54,34 @@ systemTimeTicker (Statusbar tv) = do
     let formattedTime = formatTime defaultTimeLocale timeFormat localCurTime
 
     atomically $ do
-       modifyTVar' tv (\(lastXMonadStatus, _) -> (lastXMonadStatus, formattedTime))
+       modifyTVar' tv $ updateStatusbarInfo formattedTime
 
     threadDelay 1000000 -- one second
+
+  where
+    updateStatusbarInfo :: String -> StatusbarInfo -> StatusbarInfo
+    updateStatusbarInfo newFormattedTime si = StatusbarInfo (xmonadSection si) newFormattedTime (version si)
 
 xmonadUpdateReader :: Statusbar -> IO ()
 xmonadUpdateReader (Statusbar tv) = do
     nextStatus <- getLine
 
     atomically $ do
-        modifyTVar' tv (\(_, lastTime) -> (nextStatus, lastTime))
+        modifyTVar' tv $ updateStatusbarInfo nextStatus
+
+  where
+    updateStatusbarInfo :: String -> StatusbarInfo -> StatusbarInfo
+    updateStatusbarInfo newXmonadSection si = StatusbarInfo newXmonadSection (datetimeSection si) (version si)
 
 printCurrentStatusbar :: Handle -> Statusbar -> IO ()
 printCurrentStatusbar h (Statusbar tv) = do
 
-    (currentXMonadStatus, currentTime) <- atomically $ do
+    currentStatusbarInfo<- atomically $ do
         currentStatusbarText <- readTVar tv
 
         return currentStatusbarText
 
-    hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ currentXMonadStatus ++ " ^pa(1800)" ++ currentTime
+    hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection currentStatusbarInfo) ++ " ^pa(1800)" ++ (datetimeSection currentStatusbarInfo)
 
 main :: IO ()
 main = do
@@ -77,7 +90,7 @@ main = do
 
     -- Initialize shared state.
     currentStatusbar <- atomically $ do
-        tvStatusbar <- newTVar ("", "")
+        tvStatusbar <- newTVar $ StatusbarInfo "" "" 0
         return $ Statusbar tvStatusbar
 
     -- Initialize dzen2 and hook up to its STDIN
