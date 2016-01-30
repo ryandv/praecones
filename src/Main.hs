@@ -5,6 +5,9 @@ import Control.Concurrent.STM
 
 import Control.Monad
 import Control.Monad.IO.Class
+import Control.Monad.State.Strict
+
+import Data.IORef
 
 import Data.Maybe
 
@@ -15,15 +18,20 @@ import Data.Time.LocalTime
 import System.IO
 import System.Process
 
-data Statusbar = Statusbar (TVar StatusbarInfo)
-
-data StatusbarInfo = StatusbarInfo
+data Statusbar = Statusbar
   { xmonadSection :: String
   , datetimeSection :: String
-  , version :: Int
-  }
+  } deriving(Show)
 
-instance Eq StatusbarInfo where
+data StatusbarUpdateEvent = StatusbarUpdateEvent
+  { newXmonadSection :: Maybe String
+  , newDatetimeSection :: Maybe String
+  , newVersion :: Maybe Int
+  } deriving(Show)
+
+data EventQueue a = EventQueue (TQueue a)
+
+instance Eq Statusbar where
   (==) x y = (xmonadSection x == xmonadSection y) && (datetimeSection x == datetimeSection y)
 
 {-- CONFIG --}
@@ -45,8 +53,14 @@ timeFormat = "%Y %m %d %X"
 
 {-- END CONFIG --}
 
-systemTimeTicker :: Statusbar -> IO ()
-systemTimeTicker (Statusbar tv) = do
+applyStatusbarUpdate :: Statusbar -> StatusbarUpdateEvent -> Statusbar
+applyStatusbarUpdate si ev = Statusbar nextXmonadSection nextDatetimeSection
+  where
+    nextXmonadSection = fromMaybe (xmonadSection si) (newXmonadSection ev)
+    nextDatetimeSection = fromMaybe (datetimeSection si) (newDatetimeSection ev)
+
+systemTimeTicker :: EventQueue StatusbarUpdateEvent -> IO ()
+systemTimeTicker (EventQueue tv) = do
     curTime <- getCurrentTime
     localZonedTime <- utcToLocalZonedTime curTime
 
@@ -54,34 +68,29 @@ systemTimeTicker (Statusbar tv) = do
     let formattedTime = formatTime defaultTimeLocale timeFormat localCurTime
 
     atomically $ do
-       modifyTVar' tv $ updateStatusbarInfo formattedTime
+      let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime) Nothing
+      writeTQueue tv statusbarUpdate
 
     threadDelay 1000000 -- one second
 
-  where
-    updateStatusbarInfo :: String -> StatusbarInfo -> StatusbarInfo
-    updateStatusbarInfo newFormattedTime si = StatusbarInfo (xmonadSection si) newFormattedTime (version si)
-
-xmonadUpdateReader :: Statusbar -> IO ()
-xmonadUpdateReader (Statusbar tv) = do
+xmonadUpdateReader :: EventQueue StatusbarUpdateEvent -> IO ()
+xmonadUpdateReader (EventQueue tv) = do
     nextStatus <- getLine
 
     atomically $ do
-        modifyTVar' tv $ updateStatusbarInfo nextStatus
+        writeTQueue tv $ StatusbarUpdateEvent (Just nextStatus) Nothing Nothing
 
-  where
-    updateStatusbarInfo :: String -> StatusbarInfo -> StatusbarInfo
-    updateStatusbarInfo newXmonadSection si = StatusbarInfo newXmonadSection (datetimeSection si) (version si)
+printCurrentStatusbar :: Handle -> IORef Statusbar -> EventQueue StatusbarUpdateEvent -> IO ()
+printCurrentStatusbar h ioref (EventQueue etv) = do
+    currentStatusbar <- readIORef ioref
 
-printCurrentStatusbar :: Handle -> Statusbar -> IO ()
-printCurrentStatusbar h (Statusbar tv) = do
+    nextStatusbar <- liftIO . atomically $ do
+        nextEvent <- readTQueue etv
+        return $ applyStatusbarUpdate currentStatusbar nextEvent
 
-    currentStatusbarInfo<- atomically $ do
-        currentStatusbarText <- readTVar tv
+    writeIORef ioref nextStatusbar
 
-        return currentStatusbarText
-
-    hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection currentStatusbarInfo) ++ " ^pa(1800)" ++ (datetimeSection currentStatusbarInfo)
+    liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1800)" ++ (datetimeSection nextStatusbar)
 
 main :: IO ()
 main = do
@@ -89,19 +98,21 @@ main = do
     hSetBuffering stdout NoBuffering
 
     -- Initialize shared state.
-    currentStatusbar <- atomically $ do
-        tvStatusbar <- newTVar $ StatusbarInfo "" "" 0
-        return $ Statusbar tvStatusbar
+    eventQueue <- fmap EventQueue $ atomically $ newTQueue
+
+    -- Initialize thread-local mutable statusbar ref.
+    statusbar <- newIORef $ Statusbar "" ""
 
     -- Initialize dzen2 and hook up to its STDIN
     (dzen2Stdin, dzen2Stdout, dzen2Stderr, dzen2Ph) <- createProcess dzen2Spec
 
     -- Assume we can acquire a handle for now...
     let dzen2Stdin' = fromJust $ dzen2Stdin
+    hSetBuffering dzen2Stdin' NoBuffering
 
     -- Create tick threads.
-    tickTimeThread <- forkIO . forever $ systemTimeTicker currentStatusbar
-    readXmonadUpdatesThread <- forkIO . forever $ xmonadUpdateReader currentStatusbar
+    tickTimeThread <- forkIO . forever $ systemTimeTicker eventQueue
+    readXmonadUpdatesThread <- forkIO . forever $ xmonadUpdateReader eventQueue
 
     -- Print to dzen2.
-    forever $ printCurrentStatusbar dzen2Stdin' currentStatusbar
+    forever $ printCurrentStatusbar dzen2Stdin' statusbar eventQueue
