@@ -1,6 +1,7 @@
 module Main where
 
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.Chan
 import Control.Concurrent.MVar
 
 import Control.Monad
@@ -28,7 +29,7 @@ data StatusbarUpdateEvent = StatusbarUpdateEvent
   , newDatetimeSection :: Maybe String
   } deriving(Show)
 
-data EventQueue a = EventQueue (MVar a)
+data EventQueue a = EventQueue (Chan a)
 
 instance Eq Statusbar where
   (==) x y = (xmonadSection x == xmonadSection y) && (datetimeSection x == datetimeSection y)
@@ -59,7 +60,7 @@ applyStatusbarUpdate si ev = Statusbar nextXmonadSection nextDatetimeSection
     nextDatetimeSection = fromMaybe (datetimeSection si) (newDatetimeSection ev)
 
 systemTimeTicker :: EventQueue StatusbarUpdateEvent -> IO ()
-systemTimeTicker (EventQueue mv) = do
+systemTimeTicker (EventQueue chan) = do
     curTime <- getCurrentTime
     localZonedTime <- utcToLocalZonedTime curTime
 
@@ -67,22 +68,22 @@ systemTimeTicker (EventQueue mv) = do
     let formattedTime = formatTime defaultTimeLocale timeFormat localCurTime
 
     let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime)
-    putMVar mv statusbarUpdate
+    writeChan chan statusbarUpdate
 
     threadDelay 1000000 -- one second
 
 xmonadUpdateReader :: EventQueue StatusbarUpdateEvent -> IO ()
-xmonadUpdateReader (EventQueue mv) = do
+xmonadUpdateReader (EventQueue chan) = do
     nextStatus <- getLine
 
-    putMVar mv $ StatusbarUpdateEvent (Just nextStatus) Nothing
+    writeChan chan $ StatusbarUpdateEvent (Just nextStatus) Nothing
 
 printCurrentStatusbar :: Handle -> IORef Statusbar -> EventQueue StatusbarUpdateEvent -> IO ()
-printCurrentStatusbar h ioref (EventQueue mv) = do
+printCurrentStatusbar h ioref (EventQueue chan) = do
     currentStatusbar <- readIORef ioref
 
     nextStatusbar <- do
-        nextEvent <- takeMVar mv
+        nextEvent <- readChan chan
         return $ applyStatusbarUpdate currentStatusbar nextEvent
 
     writeIORef ioref nextStatusbar
@@ -95,7 +96,7 @@ main = do
     hSetBuffering stdout NoBuffering
 
     -- Initialize shared state.
-    eventQueue <- fmap EventQueue $ newEmptyMVar
+    eventQueue <- fmap EventQueue $ newChan
 
     -- Initialize thread-local mutable statusbar ref.
     statusbar <- newIORef $ Statusbar "" ""
