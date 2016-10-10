@@ -37,7 +37,7 @@ instance Eq Statusbar where
 
 dzen2Spec :: CreateProcess
 dzen2Spec = CreateProcess
-    (ShellCommand "dzen2")
+    (ShellCommand "dzen2 -fn '-*-terminus-*-*-*-*-*-320-*-*-*-*-*-*'")
     Nothing
     Nothing
     CreatePipe
@@ -87,7 +87,7 @@ printCurrentStatusbar h ioref (EventQueue mv) = do
 
     writeIORef ioref nextStatusbar
 
-    liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1800)" ++ (datetimeSection nextStatusbar)
+    liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1500)" ++ (datetimeSection nextStatusbar)
 
 main :: IO ()
 main = do
