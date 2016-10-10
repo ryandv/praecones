@@ -26,7 +26,6 @@ data Statusbar = Statusbar
 data StatusbarUpdateEvent = StatusbarUpdateEvent
   { newXmonadSection :: Maybe String
   , newDatetimeSection :: Maybe String
-  , newVersion :: Maybe Int
   } deriving(Show)
 
 data EventQueue a = EventQueue (TQueue a)
