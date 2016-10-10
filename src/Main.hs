@@ -1,7 +1,7 @@
 module Main where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.STM
+import Control.Concurrent.MVar
 
 import Control.Monad
 import Control.Monad.IO.Class
@@ -28,7 +28,7 @@ data StatusbarUpdateEvent = StatusbarUpdateEvent
   , newDatetimeSection :: Maybe String
   } deriving(Show)
 
-data EventQueue a = EventQueue (TQueue a)
+data EventQueue a = EventQueue (MVar a)
 
 instance Eq Statusbar where
   (==) x y = (xmonadSection x == xmonadSection y) && (datetimeSection x == datetimeSection y)
@@ -59,32 +59,30 @@ applyStatusbarUpdate si ev = Statusbar nextXmonadSection nextDatetimeSection
     nextDatetimeSection = fromMaybe (datetimeSection si) (newDatetimeSection ev)
 
 systemTimeTicker :: EventQueue StatusbarUpdateEvent -> IO ()
-systemTimeTicker (EventQueue tv) = do
+systemTimeTicker (EventQueue mv) = do
     curTime <- getCurrentTime
     localZonedTime <- utcToLocalZonedTime curTime
 
     let localCurTime = zonedTimeToLocalTime localZonedTime
     let formattedTime = formatTime defaultTimeLocale timeFormat localCurTime
 
-    atomically $ do
-      let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime) Nothing
-      writeTQueue tv statusbarUpdate
+    let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime)
+    putMVar mv statusbarUpdate
 
     threadDelay 1000000 -- one second
 
 xmonadUpdateReader :: EventQueue StatusbarUpdateEvent -> IO ()
-xmonadUpdateReader (EventQueue tv) = do
+xmonadUpdateReader (EventQueue mv) = do
     nextStatus <- getLine
 
-    atomically $ do
-        writeTQueue tv $ StatusbarUpdateEvent (Just nextStatus) Nothing Nothing
+    putMVar mv $ StatusbarUpdateEvent (Just nextStatus) Nothing
 
 printCurrentStatusbar :: Handle -> IORef Statusbar -> EventQueue StatusbarUpdateEvent -> IO ()
-printCurrentStatusbar h ioref (EventQueue etv) = do
+printCurrentStatusbar h ioref (EventQueue mv) = do
     currentStatusbar <- readIORef ioref
 
-    nextStatusbar <- liftIO . atomically $ do
-        nextEvent <- readTQueue etv
+    nextStatusbar <- do
+        nextEvent <- takeMVar mv
         return $ applyStatusbarUpdate currentStatusbar nextEvent
 
     writeIORef ioref nextStatusbar
@@ -97,7 +95,7 @@ main = do
     hSetBuffering stdout NoBuffering
 
     -- Initialize shared state.
-    eventQueue <- fmap EventQueue $ atomically $ newTQueue
+    eventQueue <- fmap EventQueue $ newEmptyMVar
 
     -- Initialize thread-local mutable statusbar ref.
     statusbar <- newIORef $ Statusbar "" ""
