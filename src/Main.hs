@@ -106,8 +106,8 @@ printCurrentStatusbar producerSemaphore consumerSemaphore h ioref (EventQueue ch
     currentStatusbar <- readIORef ioref
 
     nextEvent <- consumer producerSemaphore consumerSemaphore (EventQueue chan)
-    let nextStatusbar = applyStatusbarUpdate currentStatusbar nextEvent
 
+    let nextStatusbar = applyStatusbarUpdate currentStatusbar nextEvent
     writeIORef ioref nextStatusbar
 
     liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1500)" ++ (datetimeSection nextStatusbar)
@@ -122,34 +122,26 @@ systemTimeTicker producerSemaphore consumerSemaphore (EventQueue chan) = do
 
     let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime)
 
-    producer "TIME" producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate
+    producer producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate
 
 xmonadUpdateReader :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO ()
 xmonadUpdateReader producerSemaphore consumerSemaphore (EventQueue chan) = do
     nextStatus <- getLine
-    logMessage "xmonad update received"
 
     let statusbarUpdate = StatusbarUpdateEvent (Just nextStatus) Nothing
 
-    producer "XMONAD" producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate
+    producer producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate
 
 consumer :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO StatusbarUpdateEvent
 consumer producerSemaphore consumerSemaphore (EventQueue chan) = do
-    logMessage "consumer waiting on semaphore"
     waitQSem consumerSemaphore
+    nextEvent <- readChan chan
+    signalQSem producerSemaphore
 
-    logMessage "consumer proceeding"
-
-    nextEvent <- readChan chan;                                        logMessage "consumer reading from chan"
-    signalQSem producerSemaphore                                    >> logMessage "consumer increasing producer semaphore"
     return nextEvent
 
-producer :: String -> QSem -> QSem -> EventQueue StatusbarUpdateEvent -> StatusbarUpdateEvent -> IO ()
-producer name producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate = do
-    logMessage $ name ++ " waiting on semaphore"
+producer :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> StatusbarUpdateEvent -> IO ()
+producer producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate = do
     waitQSem producerSemaphore
-
-    logMessage $ name ++ " proceeding"
-
-    writeChan chan statusbarUpdate                               >> (logMessage $ name ++ " writing to chan")
-    signalQSem consumerSemaphore                                 >> (logMessage $ name ++ " increasing consumer semaphore")
+    writeChan chan statusbarUpdate
+    signalQSem consumerSemaphore
