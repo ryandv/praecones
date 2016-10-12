@@ -4,6 +4,7 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Chan
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
+import Control.Concurrent.STM.TBQueue
 
 import Control.Exception
 
@@ -27,13 +28,12 @@ data Statusbar = Statusbar
   , datetimeSection :: String
   } deriving(Show)
 
-data EventQueue a = EventQueue (TVar Int) (TVar [a])
+data EventQueue a = EventQueue (TBQueue a)
 
 newEventQueue :: Int -> IO (EventQueue a)
 newEventQueue size = atomically $ do
-  sizeVar <- newTVar size
-  events <- newTVar []
-  return $ EventQueue sizeVar events
+  events <- newTBQueue size
+  return $ EventQueue events
 
 instance Eq Statusbar where
   (==) x y = (xmonadSection x == xmonadSection y) && (datetimeSection x == datetimeSection y)
@@ -114,14 +114,14 @@ updateTimeSection statusbar events = do
     return $ Statusbar (xmonadSection statusbar) newSection
 
 systemTimeTicker :: EventQueue String -> IO ()
-systemTimeTicker (EventQueue size events) = do
+systemTimeTicker events = do
     curTime <- getCurrentTime
     localZonedTime <- utcToLocalZonedTime curTime
 
     let localCurTime = zonedTimeToLocalTime localZonedTime
     let formattedTime = formatTime defaultTimeLocale timeFormat localCurTime
 
-    atomically $ producer (EventQueue size events) formattedTime
+    atomically $ producer events formattedTime
 
 updateXmonadSection :: Statusbar -> EventQueue String -> STM Statusbar
 updateXmonadSection statusbar events = do
@@ -129,30 +129,16 @@ updateXmonadSection statusbar events = do
     return $ Statusbar newSection (datetimeSection statusbar)
 
 xmonadUpdateReader :: EventQueue String -> IO ()
-xmonadUpdateReader (EventQueue size events) = do
+xmonadUpdateReader events = do
     nextStatus <- getLine
 
-    atomically $ producer (EventQueue size events) nextStatus
+    atomically $ producer events nextStatus
 
 consumer :: EventQueue String -> STM String
-consumer (EventQueue size events) = do
-    avail <- readTVar size
-
-    writeTVar size (avail + 1)
-
-    evs <- readTVar events
-    case evs of
-      [] -> retry
-      (e:es) -> do
-        writeTVar events es
-        return e
+consumer (EventQueue events) = do
+    e <- readTBQueue events
+    return e
 
 producer :: EventQueue String -> String -> STM ()
-producer (EventQueue size events) statusbarUpdate = do
-    avail <- readTVar size
-    when (avail == 0) retry
-
-    evs <- readTVar events
-
-    writeTVar size (avail - 1)
-    writeTVar events $ evs ++ [statusbarUpdate]
+producer (EventQueue events) statusbarUpdate = do
+    writeTBQueue events statusbarUpdate
