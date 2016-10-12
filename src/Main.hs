@@ -32,16 +32,7 @@ data StatusbarUpdateEvent = StatusbarUpdateEvent
   , newDatetimeSection :: Maybe String
   } deriving(Show)
 
-data Event a = Event a (EventStream a)
-type EventStream a = MVar (Event a)
-data EventQueue a = EventQueue (MVar (EventStream a)) (MVar (EventStream a))
-
-newEventQueue :: IO (EventQueue a)
-newEventQueue = do
-  hole <- newEmptyMVar
-  readVar <- newMVar hole
-  writeVar <- newMVar hole
-  return $ EventQueue readVar writeVar
+data EventQueue a = EventQueue (Chan a)
 
 instance Eq Statusbar where
   (==) x y = (xmonadSection x == xmonadSection y) && (datetimeSection x == datetimeSection y)
@@ -92,7 +83,7 @@ main = do
       -- Initialize shared state.
       producerSemaphore <- newQSem maxLen
       consumerSemaphore <- newQSem 0
-      eventQueue <- newEventQueue
+      eventQueue <- fmap EventQueue $ newChan
 
       -- Initialize thread-local mutable statusbar ref.
       statusbar <- newIORef $ Statusbar "" ""
@@ -112,10 +103,10 @@ main = do
       forever $ printCurrentStatusbar producerSemaphore consumerSemaphore dzen2Stdin' statusbar eventQueue
 
 printCurrentStatusbar :: QSem -> QSem -> Handle -> IORef Statusbar -> EventQueue StatusbarUpdateEvent -> IO ()
-printCurrentStatusbar producerSemaphore consumerSemaphore h ioref (EventQueue readVar writeVar) = do
+printCurrentStatusbar producerSemaphore consumerSemaphore h ioref (EventQueue chan) = do
     currentStatusbar <- readIORef ioref
 
-    nextEvent <- consumer producerSemaphore consumerSemaphore (EventQueue readVar writeVar)
+    nextEvent <- consumer producerSemaphore consumerSemaphore (EventQueue chan)
 
     let nextStatusbar = applyStatusbarUpdate currentStatusbar nextEvent
     writeIORef ioref nextStatusbar
@@ -123,7 +114,7 @@ printCurrentStatusbar producerSemaphore consumerSemaphore h ioref (EventQueue re
     liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1500)" ++ (datetimeSection nextStatusbar)
 
 systemTimeTicker :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO ()
-systemTimeTicker producerSemaphore consumerSemaphore (EventQueue readVar writeVar) = do
+systemTimeTicker producerSemaphore consumerSemaphore (EventQueue chan) = do
     curTime <- getCurrentTime
     localZonedTime <- utcToLocalZonedTime curTime
 
@@ -132,37 +123,30 @@ systemTimeTicker producerSemaphore consumerSemaphore (EventQueue readVar writeVa
 
     let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime)
 
-    producer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) statusbarUpdate
+    producer producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate
 
 xmonadUpdateReader :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO ()
-xmonadUpdateReader producerSemaphore consumerSemaphore (EventQueue readVar writeVar) = do
+xmonadUpdateReader producerSemaphore consumerSemaphore (EventQueue chan) = do
     nextStatus <- getLine
 
     let statusbarUpdate = StatusbarUpdateEvent (Just nextStatus) Nothing
 
-    producer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) statusbarUpdate
+    producer producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate
 
 consumer :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO StatusbarUpdateEvent
-consumer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) = do
+consumer producerSemaphore consumerSemaphore (EventQueue chan) = do
     waitQSem consumerSemaphore
 
-    nextEvent <- do
-      stream <- takeMVar readVar
-      Event ev tail <- takeMVar stream
-      putMVar readVar tail
-      return ev
+    nextEvent <- readChan chan
 
     signalQSem producerSemaphore
 
     return nextEvent
 
 producer :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> StatusbarUpdateEvent -> IO ()
-producer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) statusbarUpdate = do
+producer producerSemaphore consumerSemaphore (EventQueue chan) statusbarUpdate = do
     waitQSem producerSemaphore
 
-    newHole <- newEmptyMVar
-    oldHole <- takeMVar writeVar
-    putMVar oldHole (Event statusbarUpdate newHole)
-    putMVar writeVar newHole
+    writeChan chan statusbarUpdate
 
     signalQSem consumerSemaphore
