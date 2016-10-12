@@ -27,11 +27,6 @@ data Statusbar = Statusbar
   , datetimeSection :: String
   } deriving(Show)
 
-data StatusbarUpdateEvent = StatusbarUpdateEvent
-  { newXmonadSection :: Maybe String
-  , newDatetimeSection :: Maybe String
-  } deriving(Show)
-
 data EventQueue a = EventQueue (TVar Int) (TVar [a])
 
 newEventQueue :: Int -> IO (EventQueue a)
@@ -72,12 +67,6 @@ logMessage msg = (flip catch) ((\e -> return ()) :: SomeException -> IO ()) $ do
 logException :: SomeException -> IO ()
 logException ex = logMessage (show ex)
 
-applyStatusbarUpdate :: Statusbar -> StatusbarUpdateEvent -> Statusbar
-applyStatusbarUpdate si ev = Statusbar nextXmonadSection nextDatetimeSection
-  where
-    nextXmonadSection = fromMaybe (xmonadSection si) (newXmonadSection ev)
-    nextDatetimeSection = fromMaybe (datetimeSection si) (newDatetimeSection ev)
-
 {-- END CONFIG --}
 
 main :: IO ()
@@ -87,7 +76,8 @@ main = do
       hSetBuffering stdout NoBuffering
 
       -- Initialize shared state.
-      eventQueue <- newEventQueue maxLen
+      xmonadEventQueue <- newEventQueue maxLen
+      systemTimeEventQueue <- newEventQueue maxLen
 
       -- Initialize thread-local mutable statusbar ref.
       statusbar <- newIORef $ Statusbar "" ""
@@ -100,24 +90,30 @@ main = do
       hSetBuffering dzen2Stdin' NoBuffering
 
       -- Create tick threads.
-      tickTimeThread <- forkIO . forever $ systemTimeTicker eventQueue
-      readXmonadUpdatesThread <- forkIO . forever $ xmonadUpdateReader eventQueue
+      tickTimeThread <- forkIO . forever $ systemTimeTicker systemTimeEventQueue
+      readXmonadUpdatesThread <- forkIO . forever $ xmonadUpdateReader xmonadEventQueue
 
       -- Print to dzen2.
-      forever $ printCurrentStatusbar dzen2Stdin' statusbar eventQueue
+      forever $ printCurrentStatusbar dzen2Stdin' statusbar xmonadEventQueue systemTimeEventQueue
 
-printCurrentStatusbar :: Handle -> IORef Statusbar -> EventQueue StatusbarUpdateEvent -> IO ()
-printCurrentStatusbar h ioref (EventQueue size events) = do
+printCurrentStatusbar :: Handle -> IORef Statusbar -> EventQueue String -> EventQueue String -> IO ()
+printCurrentStatusbar h ioref xmonadEvents timeEvents = do
     currentStatusbar <- readIORef ioref
 
-    nextEvent <- consumer (EventQueue size events)
+    nextStatusbar <- atomically $
+        updateTimeSection currentStatusbar timeEvents `orElse`
+        updateXmonadSection currentStatusbar xmonadEvents
 
-    let nextStatusbar = applyStatusbarUpdate currentStatusbar nextEvent
     writeIORef ioref nextStatusbar
 
     liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1500)" ++ (datetimeSection nextStatusbar)
 
-systemTimeTicker :: EventQueue StatusbarUpdateEvent -> IO ()
+updateTimeSection :: Statusbar -> EventQueue String -> STM Statusbar
+updateTimeSection statusbar events = do
+    newSection <- consumer events
+    return $ Statusbar (xmonadSection statusbar) newSection
+
+systemTimeTicker :: EventQueue String -> IO ()
 systemTimeTicker (EventQueue size events) = do
     curTime <- getCurrentTime
     localZonedTime <- utcToLocalZonedTime curTime
@@ -125,20 +121,21 @@ systemTimeTicker (EventQueue size events) = do
     let localCurTime = zonedTimeToLocalTime localZonedTime
     let formattedTime = formatTime defaultTimeLocale timeFormat localCurTime
 
-    let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime)
+    atomically $ producer (EventQueue size events) formattedTime
 
-    producer (EventQueue size events) statusbarUpdate
+updateXmonadSection :: Statusbar -> EventQueue String -> STM Statusbar
+updateXmonadSection statusbar events = do
+    newSection <- consumer events
+    return $ Statusbar newSection (datetimeSection statusbar)
 
-xmonadUpdateReader :: EventQueue StatusbarUpdateEvent -> IO ()
+xmonadUpdateReader :: EventQueue String -> IO ()
 xmonadUpdateReader (EventQueue size events) = do
     nextStatus <- getLine
 
-    let statusbarUpdate = StatusbarUpdateEvent (Just nextStatus) Nothing
+    atomically $ producer (EventQueue size events) nextStatus
 
-    producer (EventQueue size events) statusbarUpdate
-
-consumer :: EventQueue StatusbarUpdateEvent -> IO StatusbarUpdateEvent
-consumer (EventQueue size events) = atomically $ do
+consumer :: EventQueue String -> STM String
+consumer (EventQueue size events) = do
     avail <- readTVar size
 
     writeTVar size (avail + 1)
@@ -150,8 +147,8 @@ consumer (EventQueue size events) = atomically $ do
         writeTVar events es
         return e
 
-producer :: EventQueue StatusbarUpdateEvent -> StatusbarUpdateEvent -> IO ()
-producer (EventQueue size events) statusbarUpdate = atomically $ do
+producer :: EventQueue String -> String -> STM ()
+producer (EventQueue size events) statusbarUpdate = do
     avail <- readTVar size
     when (avail == 0) retry
 
