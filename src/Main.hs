@@ -3,7 +3,7 @@ module Main where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Chan
 import Control.Concurrent.MVar
-import Control.Concurrent.QSem
+import Control.Concurrent.STM
 
 import Control.Exception
 
@@ -32,16 +32,13 @@ data StatusbarUpdateEvent = StatusbarUpdateEvent
   , newDatetimeSection :: Maybe String
   } deriving(Show)
 
-data Event a = Event a (EventStream a)
-type EventStream a = MVar (Event a)
-data EventQueue a = EventQueue (MVar (EventStream a)) (MVar (EventStream a))
+data EventQueue a = EventQueue (TVar Int) (TVar [a])
 
-newEventQueue :: IO (EventQueue a)
-newEventQueue = do
-  hole <- newEmptyMVar
-  readVar <- newMVar hole
-  writeVar <- newMVar hole
-  return $ EventQueue readVar writeVar
+newEventQueue :: Int -> IO (EventQueue a)
+newEventQueue size = atomically $ do
+  sizeVar <- newTVar size
+  events <- newTVar []
+  return $ EventQueue sizeVar events
 
 instance Eq Statusbar where
   (==) x y = (xmonadSection x == xmonadSection y) && (datetimeSection x == datetimeSection y)
@@ -90,9 +87,7 @@ main = do
       hSetBuffering stdout NoBuffering
 
       -- Initialize shared state.
-      producerSemaphore <- newQSem maxLen
-      consumerSemaphore <- newQSem 0
-      eventQueue <- newEventQueue
+      eventQueue <- newEventQueue maxLen
 
       -- Initialize thread-local mutable statusbar ref.
       statusbar <- newIORef $ Statusbar "" ""
@@ -105,25 +100,25 @@ main = do
       hSetBuffering dzen2Stdin' NoBuffering
 
       -- Create tick threads.
-      tickTimeThread <- forkIO . forever $ systemTimeTicker producerSemaphore consumerSemaphore eventQueue
-      readXmonadUpdatesThread <- forkIO . forever $ xmonadUpdateReader producerSemaphore consumerSemaphore eventQueue
+      tickTimeThread <- forkIO . forever $ systemTimeTicker eventQueue
+      readXmonadUpdatesThread <- forkIO . forever $ xmonadUpdateReader eventQueue
 
       -- Print to dzen2.
-      forever $ printCurrentStatusbar producerSemaphore consumerSemaphore dzen2Stdin' statusbar eventQueue
+      forever $ printCurrentStatusbar dzen2Stdin' statusbar eventQueue
 
-printCurrentStatusbar :: QSem -> QSem -> Handle -> IORef Statusbar -> EventQueue StatusbarUpdateEvent -> IO ()
-printCurrentStatusbar producerSemaphore consumerSemaphore h ioref (EventQueue readVar writeVar) = do
+printCurrentStatusbar :: Handle -> IORef Statusbar -> EventQueue StatusbarUpdateEvent -> IO ()
+printCurrentStatusbar h ioref (EventQueue size events) = do
     currentStatusbar <- readIORef ioref
 
-    nextEvent <- consumer producerSemaphore consumerSemaphore (EventQueue readVar writeVar)
+    nextEvent <- consumer (EventQueue size events)
 
     let nextStatusbar = applyStatusbarUpdate currentStatusbar nextEvent
     writeIORef ioref nextStatusbar
 
     liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1500)" ++ (datetimeSection nextStatusbar)
 
-systemTimeTicker :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO ()
-systemTimeTicker producerSemaphore consumerSemaphore (EventQueue readVar writeVar) = do
+systemTimeTicker :: EventQueue StatusbarUpdateEvent -> IO ()
+systemTimeTicker (EventQueue size events) = do
     curTime <- getCurrentTime
     localZonedTime <- utcToLocalZonedTime curTime
 
@@ -132,37 +127,35 @@ systemTimeTicker producerSemaphore consumerSemaphore (EventQueue readVar writeVa
 
     let statusbarUpdate = StatusbarUpdateEvent Nothing (Just formattedTime)
 
-    producer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) statusbarUpdate
+    producer (EventQueue size events) statusbarUpdate
 
-xmonadUpdateReader :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO ()
-xmonadUpdateReader producerSemaphore consumerSemaphore (EventQueue readVar writeVar) = do
+xmonadUpdateReader :: EventQueue StatusbarUpdateEvent -> IO ()
+xmonadUpdateReader (EventQueue size events) = do
     nextStatus <- getLine
 
     let statusbarUpdate = StatusbarUpdateEvent (Just nextStatus) Nothing
 
-    producer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) statusbarUpdate
+    producer (EventQueue size events) statusbarUpdate
 
-consumer :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> IO StatusbarUpdateEvent
-consumer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) = do
-    waitQSem consumerSemaphore
+consumer :: EventQueue StatusbarUpdateEvent -> IO StatusbarUpdateEvent
+consumer (EventQueue size events) = atomically $ do
+    avail <- readTVar size
 
-    nextEvent <- do
-      stream <- takeMVar readVar
-      Event ev tail <- takeMVar stream
-      putMVar readVar tail
-      return ev
+    writeTVar size (avail + 1)
 
-    signalQSem producerSemaphore
+    evs <- readTVar events
+    case evs of
+      [] -> retry
+      (e:es) -> do
+        writeTVar events es
+        return e
 
-    return nextEvent
+producer :: EventQueue StatusbarUpdateEvent -> StatusbarUpdateEvent -> IO ()
+producer (EventQueue size events) statusbarUpdate = atomically $ do
+    avail <- readTVar size
+    when (avail == 0) retry
 
-producer :: QSem -> QSem -> EventQueue StatusbarUpdateEvent -> StatusbarUpdateEvent -> IO ()
-producer producerSemaphore consumerSemaphore (EventQueue readVar writeVar) statusbarUpdate = do
-    waitQSem producerSemaphore
+    evs <- readTVar events
 
-    newHole <- newEmptyMVar
-    oldHole <- takeMVar writeVar
-    putMVar oldHole (Event statusbarUpdate newHole)
-    putMVar writeVar newHole
-
-    signalQSem consumerSemaphore
+    writeTVar size (avail - 1)
+    writeTVar events $ evs ++ [statusbarUpdate]
