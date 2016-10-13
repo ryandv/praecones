@@ -42,7 +42,7 @@ instance Eq Statusbar where
 
 dzen2Spec :: CreateProcess
 dzen2Spec = CreateProcess
-    (ShellCommand "dzen2 -fn '-*-terminus-*-*-*-*-*-320-*-*-*-*-*-*'")
+    (ShellCommand "dzen2")
     Nothing
     Nothing
     CreatePipe
@@ -106,7 +106,7 @@ printCurrentStatusbar h ioref xmonadEvents timeEvents = do
 
     writeIORef ioref nextStatusbar
 
-    liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1500)" ++ (datetimeSection nextStatusbar)
+    liftIO . hPutStrLn h $ "^fg(#e4e4e4)^pa(0)" ++ (xmonadSection nextStatusbar) ++ " ^pa(1800)" ++ (datetimeSection nextStatusbar)
 
 updateTimeSection :: Statusbar -> EventQueue String -> STM Statusbar
 updateTimeSection statusbar events = do
@@ -120,6 +120,8 @@ systemTimeTicker events = do
 
     let localCurTime = zonedTimeToLocalTime localZonedTime
     let formattedTime = formatTime defaultTimeLocale timeFormat localCurTime
+
+    threadDelay 1000000
 
     atomically $ producer events formattedTime
 
@@ -135,10 +137,7 @@ xmonadUpdateReader events = do
     atomically $ producer events nextStatus
 
 consumer :: EventQueue String -> STM String
-consumer (EventQueue events) = do
-    e <- readTBQueue events
-    return e
+consumer (EventQueue events) = readTBQueue events
 
 producer :: EventQueue String -> String -> STM ()
-producer (EventQueue events) statusbarUpdate = do
-    writeTBQueue events statusbarUpdate
+producer (EventQueue events) statusbarUpdate = writeTBQueue events statusbarUpdate
