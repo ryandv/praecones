@@ -55,8 +55,10 @@ dzen2Spec = CreateProcess
 timeFormat :: String
 timeFormat = "%Y %m %d %X"
 
-maxLen :: Int
-maxLen = 2
+maxQueueLength :: Int
+maxQueueLength = 2
+
+{-- END CONFIG --}
 
 logMessage :: String -> IO ()
 logMessage msg = (flip catch) ((\e -> return ()) :: SomeException -> IO ()) $ do
@@ -67,8 +69,6 @@ logMessage msg = (flip catch) ((\e -> return ()) :: SomeException -> IO ()) $ do
 logException :: SomeException -> IO ()
 logException ex = logMessage (show ex)
 
-{-- END CONFIG --}
-
 main :: IO ()
 main = do
     (flip catch) logException $ do
@@ -76,8 +76,8 @@ main = do
       hSetBuffering stdout NoBuffering
 
       -- Initialize shared state.
-      xmonadEventQueue <- newEventQueue maxLen
-      systemTimeEventQueue <- newEventQueue maxLen
+      xmonadEventQueue <- newEventQueue maxQueueLength
+      systemTimeEventQueue <- newEventQueue maxQueueLength
 
       -- Initialize thread-local mutable statusbar ref.
       statusbar <- newIORef $ Statusbar "" ""
